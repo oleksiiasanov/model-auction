@@ -1,0 +1,139 @@
+# Auction Simulator Local Configuration
+# Production ClickHouse connection
+
+simulation:
+  # Minimum time_left threshold for pressure calculation (prevents division by near-zero)
+  # NOTE: Currently unused with hourly updates (min time_left = 0.042 at hour 23)
+  # Serves as safety net for future implementations (e.g., minute-level updates)
+  min_time_left_threshold: 0.001
+
+  # Minimum time_progress threshold for pacing gate (prevents zero max_allowed at hour 0)
+  # NOTE: Actively used at hour 0 (time_progress=0.0 < 0.042)
+  # Fixes critical bug where all ads blocked after first auction win at hour 0
+  # Value 0.042 = 1 hour (1/24), allows ~5% budget in first hour
+  min_time_progress_threshold: 0.042
+
+  pacing_tolerance: 0.2
+  # OPTIMAL: bid_step = 0.003 (93% reach accuracy after extensive testing)
+  # Provides best balance: paid 38% / organic 62% (close to actual 35%/65%)
+  # Tested values: 0.001 (33% accuracy), 0.0015-0.0025 (60-85%), 0.003 (93%), 0.005-0.01 (88-78%)
+  bid_step: 0.003  # Testing bid_step variation
+  batch_size: 40
+  min_bid_fallback: 100
+
+  # Organic fallback pool split (change: update-paid-eligibility-and-organic-fallback-allocation)
+  # Remaining reach slots are split between paid-exhausted and free ads
+  organic_fallback:
+    free_share: 0.8  # 80% for free ads (0.0-1.0)
+    # paid_exhausted_share is implicit: 1.0 - free_share = 20%
+    use_cumulative_allocator: true  # Use carry-over allocator (vs per-batch floor)
+
+  # Cascading win cap and pacing relaxation (change: add-cascading-win-cap-and-pacing)
+  # Dynamic mechanism to increase budget utilization when under-spending
+  cascading_win_cap:
+    enabled: true  # Enable cascading win cap logic
+
+    # Win cap thresholds based on under_spend_ratio (cumulative_spend / target_spend)
+    # System evaluates thresholds in order and applies first matching cap
+    cap_thresholds:
+      - ratio: 0.9   # If spending < 90% of target → 2 wins per ad
+        cap: 2
+      - ratio: 0.75  # If spending < 75% of target → 3 wins per ad
+        cap: 3
+      - ratio: 0.6   # If spending < 60% of target → 4 wins per ad
+        cap: 4
+
+    max_win_per_ad_cap: 4  # Hard limit (never exceed)
+
+    # Pacing gate relaxation (fallback after win cap doesn't increase spend)
+    pacing_relaxation:
+      enabled: true  # Enable pacing relaxation fallback
+      fallback_hours: 2  # Relax pacing after N consecutive under-spend hours
+      under_spend_threshold: 0.85  # Consider "under-spending" if ratio < 85%
+      tolerance_increment: 0.1  # Add this amount to pacing_tolerance each relax
+      tolerance_max: 0.5  # Maximum pacing_tolerance (don't exceed 50% ahead)
+
+  # Feedback pricing controller (change: add-feedback-price-multiplier-universal-pacing)
+  # Adaptive price multiplier for universal pacing across heterogeneous categories
+  feedback_pricing:
+    enabled: true  # Set to true to enable feedback controller
+
+    # PI controller gains
+    Kp: 0.05  # Proportional gain (response to current error)
+    Ki: 0.02  # Integral gain (response to cumulative error)
+
+    # Multiplier bounds
+    multiplier_min: 0.5   # Minimum price multiplier (50% of base bid)
+    multiplier_max: 3.0   # Maximum price multiplier (300% of base bid)
+    multiplier_initial: 1.0  # Initial multiplier value
+
+    # Control limits
+    delta_limit: 0.3  # Maximum multiplier change per update (prevents oscillation)
+    integral_min: -1.0  # Minimum integral state (anti-windup)
+    integral_max: 1.0   # Maximum integral state (anti-windup)
+
+    # Smoothing
+    alpha: 0.7  # EMA smoothing factor (0.0 = no smoothing, 1.0 = no smoothing)
+                # Lower values = more smoothing, higher values = faster response
+
+    # Update cadence
+    update_cadence: "hourly"  # Controller update frequency: hourly, per_batch, per_10min
+
+    # Target spend curve
+    target_curve:
+      shape: "linear"  # linear, front_loaded, back_loaded
+      # Linear: T_t = B * time_progress_t
+      # Front-loaded: T_t = B * (time_progress_t ^ 0.8)  (spend faster early)
+      # Back-loaded: T_t = B * (time_progress_t ^ 1.2)   (spend slower early)
+
+# Database configuration (ClickHouse)
+database:
+  type: clickhouse
+  host: "ch-prod.yallasvc.net"
+  port: 8123  # HTTP protocol
+  database: "analytics"
+  user: "app_tableau_20230509"
+  password: "vmkdWSxgi8k%NrW"
+  secure: false  # false for HTTP
+  connect_timeout: 30
+  send_receive_timeout: 300
+
+# PostgreSQL configuration (for min_bid lookup)
+postgres_database:
+  type: postgres
+  host: "trueslave.db.yallasvc.net"
+  port: 5432
+  database: "campaign_microservice"
+  user: "read_only"
+  password: "gStEXyxRwWgwbhL"
+  connect_timeout: 30
+
+# Data caching
+cache:
+  directory: "data/cache"
+  ttl_hours: 24
+
+# Reporting
+reporting:
+  output_directory: "outputs"
+  decimal_places: 2
+  currency_unit: "AZN"
+
+# Cleanup
+cleanup:
+  keep_last_runs: 3  # Number of recent simulation runs to keep when cleaning outputs
+
+# Simulation Logging (detailed event tracking)
+logging:
+  simulation_log_enabled: true
+  log_format: "both"
+  log_top_n_winners: 40  # Show all winners per batch
+  log_pressure_changes: false  # Disable to reduce log size
+  log_pacing_events: false  # Disable to reduce log size
+  log_budget_events: false  # Disable to reduce log size
+
+# Python Logging
+python_logging:
+  level: "INFO"
+  format: "json"
+  file: "simulation.log"
